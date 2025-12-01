@@ -16,7 +16,7 @@ from telegram.ext import (
 )
 
 # --- CONFIGURATION ---
-TOKEN = os.getenv("BOT_TOKEN")  # Will be set in Render Environment Variables
+TOKEN = os.getenv("BOT_TOKEN") 
 ADMIN_ID = 5490832869
 PORT = int(os.environ.get("PORT", 10000))
 
@@ -63,24 +63,24 @@ def init_db():
         upload_date TEXT
     )""")
 
-    # Check if Super Admin exists in DB, if not, add/update
+    # Check if Super Admin exists (Initial Dummy Setup)
     c.execute("SELECT * FROM users WHERE user_id = ?", (ADMIN_ID,))
     if not c.fetchone():
-        # Pre-register the super admin
         c.execute("""INSERT INTO users (user_id, name, roll, batch, role, joined_date) 
                      VALUES (?, 'Super Admin', '000000', 'Admin', 'admin', ?)""", 
                      (ADMIN_ID, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     else:
+        # Ensure ID 5490832869 is always admin
         c.execute("UPDATE users SET role = 'admin' WHERE user_id = ?", (ADMIN_ID,))
         
     conn.commit()
     conn.close()
 
 # --- CONVERSATION STATES ---
-(NAME, ROLL, BATCH, GENDER, PHONE, PHOTO, FB_LINK, BLOOD, HOMETOWN, EMAIL, CONFIRM) = range(11)
-(UPLOAD_CATEGORY, UPLOAD_CONFIRM) = range(11, 13)
+(NAME, ROLL, BATCH, GENDER, PHONE, PHOTO, FB_LINK, BLOOD, HOMETOWN, EMAIL) = range(10)
+(UPLOAD_CATEGORY, UPLOAD_CONFIRM) = range(10, 12)
 
-# --- HELPERS ---
+# --- DATABASE HELPERS ---
 
 def get_db_connection():
     conn = sqlite3.connect(DB_NAME)
@@ -102,7 +102,7 @@ async def is_approved(user_id):
 async def get_main_menu_keyboard(user_id):
     keyboard = [
         ["📂 Browse Files", "📤 Upload File"],
-        ["👥 Batch Profiles", "📸 Photo Gallery"],
+        ["📂 My Files", "👥 Batch Profiles"],
         ["ℹ️ My Profile", "📞 Contact Admins"]
     ]
     
@@ -118,7 +118,7 @@ async def get_main_menu_keyboard(user_id):
         
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# --- REGISTRATION HANDLERS ---
+# --- REGISTRATION & PROFILE HANDLERS ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -128,302 +128,210 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if db_user:
         if db_user['role'] == 'blocked':
-            await update.message.reply_text("⛔ You have been blocked from using this bot.")
+            await update.message.reply_text("⛔ You are blocked.")
             return
         if db_user['role'] == 'pending':
-            await update.message.reply_text("⏳ Your registration is pending admin approval.")
+            await update.message.reply_text("⏳ Registration pending approval.")
             return
+        
+        # Super Admin First Run Prompt
+        if user.id == ADMIN_ID and db_user['name'] == 'Super Admin':
+            await update.message.reply_text("👋 **Welcome Super Admin!**\nYour profile is currently empty. Please use /update_profile to register your real details (Photo, Name, Roll) so you appear correctly in the profiles.")
         
         await update.message.reply_text(f"Welcome back, {db_user['name']}!", reply_markup=await get_main_menu_keyboard(user.id))
     else:
-        await update.message.reply_text(
-            "🎓 **Welcome to KUET EEE'24 Bot**\n\nPlease register to access course materials and batch info.",
-            parse_mode='Markdown'
-        )
-        await update.message.reply_text("Let's start! What is your **Full Name**?")
+        await update.message.reply_text("🎓 **Welcome to KUET EEE'24 Bot**\nLet's get you registered!", parse_mode='Markdown')
+        await update.message.reply_text("What is your **Full Name**?")
         return NAME
+
+async def update_profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Allows Admin (or users) to re-register to fix details."""
+    await update.message.reply_text("🔄 **Updating Profile**\nWhat is your **Full Name**? (Type /cancel to stop)")
+    return NAME
 
 async def reg_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['name'] = update.message.text
-    await update.message.reply_text("Got it. What is your **Roll Number**?")
+    await update.message.reply_text("What is your **Roll Number**?")
     return ROLL
 
 async def reg_roll(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['roll'] = update.message.text
     reply_keyboard = [["2k24", "Other"]]
-    await update.message.reply_text(
-        "Which **Batch** do you belong to?",
-        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
-    )
+    await update.message.reply_text("Which **Batch**?", reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True))
     return BATCH
 
 async def reg_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['batch'] = update.message.text
     reply_keyboard = [["Male", "Female"]]
-    await update.message.reply_text(
-        "Select your **Gender**:",
-        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
-    )
+    await update.message.reply_text("Select **Gender**:", reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True))
     return GENDER
 
 async def reg_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
     gender = update.message.text
     if gender not in ["Male", "Female"]:
-        await update.message.reply_text("Please select Male or Female.")
+        await update.message.reply_text("Select Male or Female.")
         return GENDER
     context.user_data['gender'] = gender
-    
-    msg = "Please share your **Phone Number**."
-    if gender == "Female":
-        msg += "\n(🔒 Protected: Visible ONLY to Admins)"
-    
-    await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("Share **Phone Number**:", reply_markup=ReplyKeyboardRemove())
     return PHONE
 
 async def reg_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['phone'] = update.message.text
     
-    # Photo Logic
+    # Logic: 2k24 needs photo. Admin needs photo.
     is_2k24 = context.user_data.get('batch') == '2k24'
+    is_admin_user = (update.effective_user.id == ADMIN_ID)
     is_female = context.user_data.get('gender') == 'Female'
     
-    if is_2k24:
-        if is_female:
-            await update.message.reply_text("📸 **Photo Upload** (Optional for Females).\nSend a photo or type 'skip'.")
-            return PHOTO
+    msg = "📸 **Photo Upload**"
+    if is_2k24 or is_admin_user:
+        if is_female and not is_admin_user:
+            msg += "\n(Optional for Females - Type 'skip' to pass)"
         else:
-            await update.message.reply_text("📸 **Photo Upload** (Required for 2k24).\nPlease send a clear photo of yourself.")
-            return PHOTO
+            msg += "\n(Required for 2k24/Admin)"
+        
+        await update.message.reply_text(msg)
+        return PHOTO
     else:
         context.user_data['photo_id'] = None
-        await update.message.reply_text("🔗 What is your **Facebook Profile Link**?")
+        await update.message.reply_text("🔗 **Facebook Profile Link**?")
         return FB_LINK
 
 async def reg_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.photo:
         context.user_data['photo_id'] = update.message.photo[-1].file_id
     else:
-        # Check if allowed to skip
         is_female = context.user_data.get('gender') == 'Female'
-        if is_female and update.message.text.lower() == 'skip':
-            context.user_data['photo_id'] = None
+        # Admin cannot skip photo, Female users can
+        if (is_female and update.message.text.lower() == 'skip' and update.effective_user.id != ADMIN_ID):
+             context.user_data['photo_id'] = None
         else:
-            await update.message.reply_text("❌ Photo is required for Male 2k24 students. Please upload a photo.")
+            await update.message.reply_text("❌ Photo required. Please upload.")
             return PHOTO
-            
-    await update.message.reply_text("🔗 What is your **Facebook Profile Link**?")
+    await update.message.reply_text("🔗 **Facebook Profile Link**?")
     return FB_LINK
 
 async def reg_fb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['fb_link'] = update.message.text
-    await update.message.reply_text("🩸 What is your **Blood Group**?")
+    await update.message.reply_text("🩸 **Blood Group**?")
     return BLOOD
 
 async def reg_blood(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['blood_group'] = update.message.text
-    await update.message.reply_text("🏠 What is your **Home Town**?")
+    await update.message.reply_text("🏠 **Home Town**?")
     return HOMETOWN
 
 async def reg_town(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['hometown'] = update.message.text
-    await update.message.reply_text("📧 What is your **Email Address**?")
+    await update.message.reply_text("📧 **Email Address**?")
     return EMAIL
 
 async def reg_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
     user_data['email'] = update.message.text
+    uid = update.effective_user.id
     
-    # Save to DB
     conn = get_db_connection()
-    try:
+    exists = conn.execute("SELECT 1 FROM users WHERE user_id = ?", (uid,)).fetchone()
+    
+    if exists:
+        # UPDATE existing user (e.g., Admin fixing profile)
+        conn.execute("""UPDATE users SET 
+            name=?, roll=?, batch=?, gender=?, phone=?, photo_id=?, fb_link=?, blood_group=?, hometown=?, email=?
+            WHERE user_id=?""",
+            (user_data['name'], user_data['roll'], user_data['batch'], user_data['gender'], 
+             user_data['phone'], user_data['photo_id'], user_data['fb_link'], user_data['blood_group'], 
+             user_data['hometown'], user_data['email'], uid))
+        msg = "✅ Profile Updated Successfully!"
+        role = conn.execute("SELECT role FROM users WHERE user_id=?", (uid,)).fetchone()['role']
+    else:
+        # NEW Registration
         conn.execute("""INSERT INTO users 
             (user_id, name, roll, batch, gender, phone, photo_id, fb_link, blood_group, hometown, email, joined_date)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (update.effective_user.id, user_data['name'], user_data['roll'], user_data['batch'],
+            (uid, user_data['name'], user_data['roll'], user_data['batch'],
              user_data['gender'], user_data['phone'], user_data['photo_id'], user_data['fb_link'],
              user_data['blood_group'], user_data['hometown'], user_data['email'], 
-             datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        )
-        conn.commit()
-    except sqlite3.IntegrityError:
-        await update.message.reply_text("⚠️ You are already registered or an error occurred.")
-        return ConversationHandler.END
-    finally:
-        conn.close()
-        
-    # Notify Admin
-    await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=f"🔔 **New User Registration**\nName: {user_data['name']}\nRoll: {user_data['roll']}\nBatch: {user_data['batch']}\n\n/approve_user_{update.effective_user.id}",
-        parse_mode='Markdown'
-    )
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        msg = "✅ Registration Complete! Waiting for Admin approval."
+        role = 'pending'
+
+    conn.commit()
+    conn.close()
     
-    await update.message.reply_text("✅ Registration Complete! Please wait for Admin approval.")
+    if role == 'pending':
+        await context.bot.send_message(ADMIN_ID, f"🔔 **New User**\n{user_data['name']}\n/admin to approve.")
+    
+    await update.message.reply_text(msg, reply_markup=await get_main_menu_keyboard(uid))
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Registration canceled.")
+    await update.message.reply_text("🚫 Action canceled.", reply_markup=await get_main_menu_keyboard(update.effective_user.id))
     return ConversationHandler.END
 
-# --- ADMIN HANDLERS ---
-
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id):
-        return
-        
-    keyboard = [
-        [InlineKeyboardButton("👥 Pending Users", callback_data="admin_users"),
-         InlineKeyboardButton("📁 Pending Files", callback_data="admin_files")],
-        [InlineKeyboardButton("📊 Statistics", callback_data="admin_stats")]
-    ]
-    await update.message.reply_text("👨‍💼 **Admin Panel**", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    
-    conn = get_db_connection()
-    
-    if data == "admin_users":
-        users = conn.execute("SELECT user_id, name, roll FROM users WHERE role = 'pending'").fetchall()
-        if not users:
-            await query.edit_message_text("✅ No pending users.")
-        else:
-            for u in users:
-                keyboard = [[InlineKeyboardButton("✅ Approve", callback_data=f"appr_u_{u['user_id']}"),
-                             InlineKeyboardButton("❌ Reject", callback_data=f"rej_u_{u['user_id']}")]]
-                await context.bot.send_message(
-                    chat_id=query.message.chat_id,
-                    text=f"👤 **Pending User**\nName: {u['name']}\nRoll: {u['roll']}",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode='Markdown'
-                )
-    
-    elif data == "admin_files":
-        files = conn.execute("SELECT id, caption, category, uploader_id FROM files WHERE status = 'pending'").fetchall()
-        if not files:
-            await query.edit_message_text("✅ No pending files.")
-        else:
-            for f in files:
-                uploader = conn.execute("SELECT name FROM users WHERE user_id = ?", (f['uploader_id'],)).fetchone()
-                uploader_name = uploader['name'] if uploader else "Unknown"
-                keyboard = [[InlineKeyboardButton("✅ Approve", callback_data=f"appr_f_{f['id']}"),
-                             InlineKeyboardButton("❌ Delete", callback_data=f"rej_f_{f['id']}")]]
-                await context.bot.send_message(
-                    chat_id=query.message.chat_id,
-                    text=f"📄 **Pending File**\nCategory: {f['category']}\nCaption: {f['caption']}\nUploader: {uploader_name}",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode='Markdown'
-                )
-
-    elif data == "admin_stats":
-        user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        file_count = conn.execute("SELECT COUNT(*) FROM files WHERE status='approved'").fetchone()[0]
-        await query.edit_message_text(f"📊 **Statistics**\n\nTotal Users: {user_count}\nTotal Files: {file_count}")
-
-    conn.close()
-
-async def approve_reject_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    conn = get_db_connection()
-    
-    if data.startswith("appr_u_"):
-        uid = int(data.split("_")[2])
-        conn.execute("UPDATE users SET role = 'user' WHERE user_id = ?", (uid,))
-        conn.commit()
-        await context.bot.send_message(uid, "🎉 Your account has been approved! Use /start to see the menu.")
-        await query.edit_message_text("User Approved.")
-        
-    elif data.startswith("rej_u_"):
-        uid = int(data.split("_")[2])
-        conn.execute("DELETE FROM users WHERE user_id = ?", (uid,))
-        conn.commit()
-        await query.edit_message_text("User Rejected and Removed.")
-
-    elif data.startswith("appr_f_"):
-        fid = int(data.split("_")[2])
-        conn.execute("UPDATE files SET status = 'approved' WHERE id = ?", (fid,))
-        conn.commit()
-        await query.edit_message_text("File Approved and Published.")
-        
-    elif data.startswith("rej_f_"):
-        fid = int(data.split("_")[2])
-        conn.execute("DELETE FROM files WHERE id = ?", (fid,))
-        conn.commit()
-        await query.edit_message_text("File Rejected and Deleted.")
-        
-    conn.close()
-
-# --- FILE HANDLING ---
+# --- FILE UPLOAD (With Cancel) ---
 
 async def upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_approved(update.effective_user.id):
-        await update.message.reply_text("🔒 Account not approved.")
+        await update.message.reply_text("🔒 Not approved.")
         return ConversationHandler.END
         
-    await update.message.reply_text("📤 Please send the File (Document, Photo, Video, or Audio).")
+    await update.message.reply_text("📤 **Upload File**\nSend a Document, Photo, Video, or Audio.\n\n(Type /cancel to stop)")
     return UPLOAD_CATEGORY
 
 async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    file_obj = None
-    file_type = ""
     
-    if msg.document:
-        file_obj = msg.document
-        file_type = "document"
-    elif msg.photo:
-        file_obj = msg.photo[-1]
-        file_type = "photo"
-    elif msg.video:
-        file_obj = msg.video
-        file_type = "video"
-    elif msg.audio:
-        file_obj = msg.audio
-        file_type = "audio"
-    else:
-        await update.message.reply_text("❌ Unsupported file type.")
-        return ConversationHandler.END
-        
-    context.user_data['upload_file_id'] = file_obj.file_id
-    context.user_data['upload_unique_id'] = file_obj.file_unique_id
-    context.user_data['upload_type'] = file_type
-    context.user_data['upload_caption'] = msg.caption or "No caption"
+    # Check validity
+    if not (msg.document or msg.photo or msg.video or msg.audio):
+        await update.message.reply_text("❌ Invalid file. Send a file or /cancel.")
+        return UPLOAD_CATEGORY
+
+    if msg.document: file_obj, f_type = msg.document, "document"
+    elif msg.photo: file_obj, f_type = msg.photo[-1], "photo"
+    elif msg.video: file_obj, f_type = msg.video, "video"
+    elif msg.audio: file_obj, f_type = msg.audio, "audio"
+    
+    context.user_data['up_fid'] = file_obj.file_id
+    context.user_data['up_uid'] = file_obj.file_unique_id
+    context.user_data['up_type'] = f_type
+    context.user_data['up_cap'] = msg.caption or "No caption"
     
     cats = [
         [InlineKeyboardButton("Lectures", callback_data="cat_Lectures"), InlineKeyboardButton("Books", callback_data="cat_Books")],
         [InlineKeyboardButton("Notes", callback_data="cat_Notes"), InlineKeyboardButton("Assignments", callback_data="cat_Assignments")],
         [InlineKeyboardButton("Projects", callback_data="cat_Projects"), InlineKeyboardButton("Others", callback_data="cat_Others")],
-        [InlineKeyboardButton("Album: Profiles", callback_data="cat_Album_Profiles"), InlineKeyboardButton("Album: Gallery", callback_data="cat_Album_Gallery")]
+        [InlineKeyboardButton("Album: Profiles", callback_data="cat_Album_Profiles"), InlineKeyboardButton("Album: Gallery", callback_data="cat_Album_Gallery")],
+        [InlineKeyboardButton("❌ Cancel Upload", callback_data="cat_CANCEL")]
     ]
-    await update.message.reply_text("📂 Select a Category:", reply_markup=InlineKeyboardMarkup(cats))
+    await update.message.reply_text("📂 **Select Category**:", reply_markup=InlineKeyboardMarkup(cats))
     return UPLOAD_CONFIRM
 
 async def save_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    category = query.data.split("_", 1)[1].replace("_", " ")
+    data = query.data
+    
+    if data == "cat_CANCEL":
+        await query.edit_message_text("❌ Upload canceled.")
+        return ConversationHandler.END
+        
+    category = data.split("_", 1)[1].replace("_", " ")
     
     conn = get_db_connection()
     conn.execute("""INSERT INTO files (file_id, file_unique_id, file_type, category, caption, uploader_id, upload_date)
         VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (context.user_data['upload_file_id'], context.user_data['upload_unique_id'], 
-         context.user_data['upload_type'], category, context.user_data['upload_caption'],
-         update.effective_user.id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        (context.user_data['up_fid'], context.user_data['up_uid'], context.user_data['up_type'], 
+         category, context.user_data['up_cap'], update.effective_user.id, 
+         datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     conn.close()
     
-    await query.edit_message_text(f"✅ File submitted to **{category}**. Waiting for Admin approval.", parse_mode='Markdown')
-    
-    # Notify Admin
-    await context.bot.send_message(ADMIN_ID, f"🔔 **New File Uploaded**\nCategory: {category}\n/admin to review.")
-    
+    await query.edit_message_text(f"✅ Submitted to **{category}**. Pending Admin approval.")
+    await context.bot.send_message(ADMIN_ID, f"🔔 **New File** in {category}\n/admin to review.")
     return ConversationHandler.END
 
-# --- BROWSING ---
+# --- BROWSING & DELETING ---
 
 async def browse_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cats = [
@@ -433,6 +341,26 @@ async def browse_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Album: Profiles", callback_data="view_Album Profiles"), InlineKeyboardButton("Album: Gallery", callback_data="view_Album Gallery")]
     ]
     await update.message.reply_text("📂 **Browse Files**", reply_markup=InlineKeyboardMarkup(cats))
+
+async def my_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user's own files with delete option."""
+    uid = update.effective_user.id
+    conn = get_db_connection()
+    files = conn.execute("SELECT id, caption, category, status FROM files WHERE uploader_id = ? ORDER BY id DESC LIMIT 20", (uid,)).fetchall()
+    conn.close()
+    
+    if not files:
+        await update.message.reply_text("📂 You haven't uploaded any files.")
+        return
+
+    await update.message.reply_text("📂 **My Uploads** (Tap Trash to Delete)")
+    for f in files:
+        status_icon = "✅" if f['status'] == 'approved' else "⏳"
+        keyboard = [[InlineKeyboardButton("🗑 Delete", callback_data=f"del_own_{f['id']}")]]
+        await update.message.reply_text(
+            f"{status_icon} [{f['category']}] {f['caption']}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 async def view_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -447,82 +375,135 @@ async def view_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"📂 **{category}**\nNo files found.")
         return
 
-    await query.message.reply_text(f"📂 **{category}** (Latest 10)")
+    is_adm = await is_admin(query.from_user.id)
+    await query.message.reply_text(f"📂 **{category}** (Latest)")
+    
     for f in files:
         caption = f"📄 {f['caption']}\n📅 {f['upload_date']}"
-        if f['file_type'] == 'document':
-            await context.bot.send_document(chat_id=query.message.chat_id, document=f['file_id'], caption=caption)
-        elif f['file_type'] == 'photo':
-            await context.bot.send_photo(chat_id=query.message.chat_id, photo=f['file_id'], caption=caption)
-        elif f['file_type'] == 'video':
-            await context.bot.send_video(chat_id=query.message.chat_id, video=f['file_id'], caption=caption)
-        elif f['file_type'] == 'audio':
-            await context.bot.send_audio(chat_id=query.message.chat_id, audio=f['file_id'], caption=caption)
+        # Admin gets a delete button on EVERY file
+        keyboard = [[InlineKeyboardButton("🗑 Delete (Admin)", callback_data=f"del_adm_{f['id']}")]] if is_adm else None
+        
+        try:
+            if f['file_type'] == 'document':
+                await context.bot.send_document(query.message.chat_id, document=f['file_id'], caption=caption, reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None)
+            elif f['file_type'] == 'photo':
+                await context.bot.send_photo(query.message.chat_id, photo=f['file_id'], caption=caption, reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None)
+            elif f['file_type'] == 'video':
+                await context.bot.send_video(query.message.chat_id, video=f['file_id'], caption=caption, reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None)
+            elif f['file_type'] == 'audio':
+                await context.bot.send_audio(query.message.chat_id, audio=f['file_id'], caption=caption, reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None)
+        except Exception as e:
+            logger.error(f"Error sending file: {e}")
 
-# --- BATCH PROFILES & PRIVACY ---
+async def delete_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    conn = get_db_connection()
+    
+    if data.startswith("del_own_"):
+        fid = data.split("_")[2]
+        # Verify ownership
+        file_rec = conn.execute("SELECT uploader_id FROM files WHERE id=?", (fid,)).fetchone()
+        if file_rec and file_rec['uploader_id'] == query.from_user.id:
+            conn.execute("DELETE FROM files WHERE id=?", (fid,))
+            conn.commit()
+            await query.edit_message_text("🗑 File deleted.")
+        else:
+            await query.edit_message_text("❌ Error: Not your file.")
+            
+    elif data.startswith("del_adm_"):
+        if not await is_admin(query.from_user.id): return
+        fid = data.split("_")[2]
+        conn.execute("DELETE FROM files WHERE id=?", (fid,))
+        conn.commit()
+        await query.edit_message_text("🗑 File deleted by Admin.")
+        
+    conn.close()
 
-async def batch_profiles(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Logic to show profiles
-    # For demo, asking for Roll number
-    await update.message.reply_text("🔍 Please reply with the **Roll Number** to search user.")
+# --- ADMIN PANEL ---
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update.effective_user.id): return
+    keyboard = [[InlineKeyboardButton("👥 Pending Users", callback_data="admin_users"), InlineKeyboardButton("📁 Pending Files", callback_data="admin_files")]]
+    await update.message.reply_text("👨‍💼 **Admin Panel**", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    conn = get_db_connection()
+    
+    if data == "admin_users":
+        users = conn.execute("SELECT user_id, name, roll FROM users WHERE role = 'pending'").fetchall()
+        if not users: await query.edit_message_text("✅ No pending users.")
+        for u in users:
+            k = [[InlineKeyboardButton("Approve", callback_data=f"appr_u_{u['user_id']}"), InlineKeyboardButton("Reject", callback_data=f"rej_u_{u['user_id']}")]]
+            await context.bot.send_message(query.message.chat_id, f"👤 {u['name']} ({u['roll']})", reply_markup=InlineKeyboardMarkup(k))
+            
+    elif data == "admin_files":
+        files = conn.execute("SELECT id, caption, category FROM files WHERE status = 'pending'").fetchall()
+        if not files: await query.edit_message_text("✅ No pending files.")
+        for f in files:
+            k = [[InlineKeyboardButton("Approve", callback_data=f"appr_f_{f['id']}"), InlineKeyboardButton("Reject", callback_data=f"rej_f_{f['id']}")]]
+            await context.bot.send_message(query.message.chat_id, f"📄 [{f['category']}] {f['caption']}", reply_markup=InlineKeyboardMarkup(k))
+    conn.close()
+
+async def decision_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    action, type_, id_ = data.split("_")
+    conn = get_db_connection()
+    
+    if type_ == "u": # User
+        if action == "appr":
+            conn.execute("UPDATE users SET role='user' WHERE user_id=?", (id_,))
+            try: await context.bot.send_message(id_, "🎉 Account Approved! /start to begin.")
+            except: pass
+            await query.edit_message_text("User Approved")
+        else:
+            conn.execute("DELETE FROM users WHERE user_id=?", (id_,))
+            await query.edit_message_text("User Rejected")
+            
+    elif type_ == "f": # File
+        if action == "appr":
+            conn.execute("UPDATE files SET status='approved' WHERE id=?", (id_,))
+            await query.edit_message_text("File Approved")
+        else:
+            conn.execute("DELETE FROM files WHERE id=?", (id_,))
+            await query.edit_message_text("File Deleted")
+    conn.commit()
+    conn.close()
 
 async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     roll = update.message.text
-    requester_id = update.effective_user.id
-    
+    if not roll.isdigit(): return
     conn = get_db_connection()
     target = conn.execute("SELECT * FROM users WHERE roll = ?", (roll,)).fetchone()
     conn.close()
-    
-    if not target:
-        # Check if it was a menu click or chat msg. If digits, assume search.
-        if roll.isdigit(): 
-            await update.message.reply_text("❌ User not found.")
-        return
-
-    # Privacy Check
-    requester_is_admin = await is_admin(requester_id)
-    phone = target['phone']
-    if target['gender'] == 'Female' and not requester_is_admin:
-        phone = "🔒 Hidden (Admin Only)"
-
-    msg = (f"👤 **Student Profile**\n"
-           f"Name: {target['name']}\n"
-           f"Roll: {target['roll']}\n"
-           f"Batch: {target['batch']}\n"
-           f"Blood: {target['blood_group']}\n"
-           f"Hometown: {target['hometown']}\n"
-           f"Phone: {phone}\n"
-           f"FB: {target['fb_link']}")
-           
-    if target['photo_id']:
-        await update.message.reply_photo(target['photo_id'], caption=msg, parse_mode='Markdown')
-    else:
-        await update.message.reply_text(msg, parse_mode='Markdown')
-
-# --- 2k24 CHAT FEATURE ---
-async def chat_2k24(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = get_db_connection()
-    user = conn.execute("SELECT batch FROM users WHERE user_id = ?", (update.effective_user.id,)).fetchone()
-    conn.close()
-    
-    if user and user['batch'] == '2k24':
-        # In a real scenario, this would generate a temporary invite link or open a topic
-        await update.message.reply_text("💬 **Batch 2k24 Exclusive**\n\nCreate a private Telegram Group and put the link here or use this as a discussion thread command.")
-    else:
-        await update.message.reply_text("⛔ This section is only for Batch 2k24.")
+    if target:
+        is_adm = await is_admin(update.effective_user.id)
+        phone = target['phone']
+        if target['gender'] == 'Female' and not is_adm:
+            phone = "🔒 Hidden"
+            
+        msg = f"👤 {target['name']}\nRoll: {target['roll']}\nBatch: {target['batch']}\nBlood: {target['blood_group']}\nHome: {target['hometown']}\nPhone: {phone}"
+        if target['photo_id']: await update.message.reply_photo(target['photo_id'], caption=msg)
+        else: await update.message.reply_text(msg)
+    else: await update.message.reply_text("❌ Not found.")
 
 # --- FLASK SERVER (Keep Alive) ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "KUET EEE'24 Bot is Running!"
+    return "Bot is Running!"
 
 def run_flask():
     app.run(host='0.0.0.0', port=PORT)
 
-# --- MAIN ---
+# --- MAIN EXECUTABLE ---
 
 def main():
     if not TOKEN:
@@ -533,9 +514,9 @@ def main():
     
     application = Application.builder().token(TOKEN).build()
 
-    # Conversation for Registration
+    # Conversation: Registration & Update
     reg_conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[CommandHandler("start", start), CommandHandler("update_profile", update_profile_command)],
         states={
             NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_name)],
             ROLL: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_roll)],
@@ -551,7 +532,7 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
     
-    # Conversation for File Upload
+    # Conversation: File Upload
     upload_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^📤 Upload File$"), upload_start)],
         states={
@@ -564,19 +545,19 @@ def main():
     application.add_handler(reg_conv)
     application.add_handler(upload_conv)
     
-    # Admin Handlers
+    # Menus
     application.add_handler(MessageHandler(filters.Regex("^🛠 Admin Panel$"), admin_panel))
-    application.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
-    application.add_handler(CallbackQueryHandler(approve_reject_handler, pattern="^(appr|rej)_"))
-    
-    # General Handlers
     application.add_handler(MessageHandler(filters.Regex("^📂 Browse Files$"), browse_menu))
-    application.add_handler(CallbackQueryHandler(view_category, pattern="^view_"))
-    application.add_handler(MessageHandler(filters.Regex("^👥 Batch Profiles$"), batch_profiles))
-    application.add_handler(MessageHandler(filters.Regex("^💬 2k24 Batch Chat$"), chat_2k24))
+    application.add_handler(MessageHandler(filters.Regex("^📂 My Files$"), my_files))
     
-    # Search Handler (catch-all text for rolls)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^(📂|📤|👥|📸|ℹ️|📞|🛠|💬)"), search_handler))
+    # Callbacks
+    application.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
+    application.add_handler(CallbackQueryHandler(decision_handler, pattern="^(appr|rej)_"))
+    application.add_handler(CallbackQueryHandler(delete_file_handler, pattern="^del_"))
+    application.add_handler(CallbackQueryHandler(view_category, pattern="^view_"))
+    
+    # Search / Text Handler
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_handler))
 
     # Run Flask in background
     threading.Thread(target=run_flask, daemon=True).start()
